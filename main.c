@@ -38,7 +38,6 @@
 #include <inttypes.h>
 #include <sys/types.h>
 #include <sys/queue.h>
-#include <netinet/in.h>
 #include <setjmp.h>
 #include <stdarg.h>
 #include <ctype.h>
@@ -46,6 +45,8 @@
 #include <getopt.h>
 
 #include <rte_common.h>
+#include <rte_common_vect.h>
+#include <rte_byteorder.h>
 #include <rte_log.h>
 #include <rte_memory.h>
 #include <rte_memcpy.h>
@@ -69,6 +70,10 @@
 #include <rte_ring.h>
 #include <rte_mempool.h>
 #include <rte_mbuf.h>
+#include <rte_ip.h>
+#include <rte_tcp.h>
+#include <rte_udp.h>
+#include <rte_string_fns.h>
 
 #include "main.h"
 
@@ -148,40 +153,43 @@ static inline void free_mbuf(struct rte_mbuf **rx, unsigned nb_rx)
 }
 
 static inline void
-print_dmac(struct rte_mbuf *m)
+dissect(struct rte_mbuf *mbuf,
+	struct ether_hdr **eth_hdr, struct ipv4_hdr **ipv4_hdr)
 {
-  struct ether_hdr *eth;
-  eth = rte_pktmbuf_mtod(m, struct ether_hdr *);
-  printf("%02x:%02x:%02x:%02x:%02x:%02x",
-	 eth->d_addr.addr_bytes[0],
-	 eth->d_addr.addr_bytes[1],
-	 eth->d_addr.addr_bytes[2],
-	 eth->d_addr.addr_bytes[3],
-	 eth->d_addr.addr_bytes[4],
-	 eth->d_addr.addr_bytes[5]);
+  *eth_hdr = NULL;
+  *ipv4_hdr = NULL;
+  if (!mbuf)
+    return;
+  unsigned char *data;
+  data = rte_pktmbuf_mtod(mbuf, unsigned char *);
+  *eth_hdr = (struct ether_hdr *)data;
+  *ipv4_hdr = (struct ipv4_hdr *)(data + sizeof(struct ether_hdr));
 }
 
 static inline void
-print_smac(struct rte_mbuf *m)
+print_mac(struct ether_addr *addr)
 {
-  struct ether_hdr *eth;
-  eth = rte_pktmbuf_mtod(m, struct ether_hdr *);
   printf("%02x:%02x:%02x:%02x:%02x:%02x",
-	 eth->s_addr.addr_bytes[0],
-	 eth->s_addr.addr_bytes[1],
-	 eth->s_addr.addr_bytes[2],
-	 eth->s_addr.addr_bytes[3],
-	 eth->s_addr.addr_bytes[4],
-	 eth->s_addr.addr_bytes[5]);
+	 addr->addr_bytes[0],
+	 addr->addr_bytes[1],
+	 addr->addr_bytes[2],
+	 addr->addr_bytes[3],
+	 addr->addr_bytes[4],
+	 addr->addr_bytes[5]);
+  
 }
+
+#define IPVER(PTR) (((struct ipv4_hdr *)(PTR))->version_ihl >> 4)
 
 static inline int
 recv_packets(uint8_t port)
 {
-  uint8_t portid = PORT;
+  uint8_t port_out, portid = PORT;
   uint64_t stat;
-  unsigned nb_rx, i;
+  unsigned nb_rx, nb_tx;
   struct rte_mbuf *pkts_burst[MAX_PKT_BURST];
+  /* struct ipv4_hdr *ipv4_hdr; */
+  /* struct ether_hdr *ether_hdr; */
   stat = 0;
   printf("%u ports in total.\n", port);
   while (1)
@@ -191,21 +199,29 @@ recv_packets(uint8_t port)
 	  nb_rx = rte_eth_rx_burst(portid, 0, pkts_burst, MAX_PKT_BURST);
 	  stat += nb_rx;
 	  if (nb_rx > 0)
-	    printf("%u: Recved %u packets this turn, %" PRIu64 " in total. \n",
+	    printf("%u: %u of %" PRIu64 ":\n",
 		   portid, nb_rx, stat);
-	  for (i = 0; i < nb_rx; ++i)
+	  if (nb_rx > 0)
 	    {
-	      print_smac(pkts_burst[i]);
-	      printf("->");
-	      print_dmac(pkts_burst[i]);
-	      printf("\n");
+	      port_out = portid ^ 1;
+	      nb_tx = rte_eth_tx_burst(portid ^ 1, 0, pkts_burst, nb_rx);
+	      nb_rx -= nb_tx;
+	      printf("\t%u forwarded to port %u\n", nb_tx, port_out);
 	    }
+	  /* for (i = 0; i < nb_rx; ++i) */
+	  /*   { */
+	  /*     dissect(pkts_burst[i], &ether_hdr, &ipv4_hdr); */
+	  /*     print_mac(&ether_hdr->s_addr); */
+	  /*     printf("->"); */
+	  /*     print_mac(&ether_hdr->d_addr); */
+	  /*     printf(": %d\n", IPVER(ipv4_hdr)); */
+	  /*   } */
 	  free_mbuf(pkts_burst, nb_rx);
 	}
+
     }
-
-
   return 0;
+
 }
 
 static int
