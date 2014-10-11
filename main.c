@@ -204,7 +204,7 @@ recv_packets(uint8_t port)
 	  if (nb_rx > 0)
 	    {
 	      port_out = portid ^ 1;
-	      nb_tx = rte_eth_tx_burst(portid ^ 1, 0, pkts_burst, nb_rx);
+	      nb_tx = rte_eth_tx_burst(port_out, 0, pkts_burst, nb_rx);
 	      nb_rx -= nb_tx;
 	      printf("\t%u forwarded to port %u\n", nb_tx, port_out);
 	    }
