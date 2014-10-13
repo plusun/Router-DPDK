@@ -77,7 +77,7 @@
 
 #include "main.h"
 
-#define PORT 0
+#define PORTDEF 0
 static const struct rte_eth_conf port_conf =
   {
     .rxmode =
@@ -151,6 +151,9 @@ static inline void free_mbuf(struct rte_mbuf **rx, unsigned nb_rx)
   while (nb_rx > 0)
     rte_pktmbuf_free(rx[--nb_rx]);
 }
+static unsigned long portmask = 0;
+#define NOMASK (portmask == 0)
+#define PORT(i) (NOMASK || ((portmask >> (i)) & 1))
 
 static inline void
 dissect(struct rte_mbuf *mbuf,
@@ -184,7 +187,7 @@ print_mac(struct ether_addr *addr)
 static inline int
 recv_packets(uint8_t port)
 {
-  uint8_t port_out, portid = PORT;
+  uint8_t port_out, portid = PORTDEF;
   uint64_t stat;
   unsigned nb_rx, nb_tx;
   struct rte_mbuf *pkts_burst[MAX_PKT_BURST];
@@ -195,29 +198,30 @@ recv_packets(uint8_t port)
   while (1)
     {
       for (portid = 0; portid < port; ++portid)
-	{
-	  nb_rx = rte_eth_rx_burst(portid, 0, pkts_burst, MAX_PKT_BURST);
-	  stat += nb_rx;
-	  if (nb_rx > 0)
-	    printf("%u: %u of %" PRIu64 ":\n",
-		   portid, nb_rx, stat);
-	  if (nb_rx > 0)
-	    {
-	      port_out = portid ^ 1;
-	      nb_tx = rte_eth_tx_burst(port_out, 0, pkts_burst, nb_rx);
-	      nb_rx -= nb_tx;
-	      printf("\t%u forwarded to port %u\n", nb_tx, port_out);
-	    }
-	  /* for (i = 0; i < nb_rx; ++i) */
-	  /*   { */
-	  /*     dissect(pkts_burst[i], &ether_hdr, &ipv4_hdr); */
-	  /*     print_mac(&ether_hdr->s_addr); */
-	  /*     printf("->"); */
-	  /*     print_mac(&ether_hdr->d_addr); */
-	  /*     printf(": %d\n", IPVER(ipv4_hdr)); */
-	  /*   } */
-	  free_mbuf(pkts_burst, nb_rx);
-	}
+        if (PORT(portid))
+	  {
+	    nb_rx = rte_eth_rx_burst(portid, 0, pkts_burst, MAX_PKT_BURST);
+	    stat += nb_rx;
+	    if (nb_rx > 0)
+	      printf("%u: %u of %" PRIu64 ":\n",
+		     portid, nb_rx, stat);
+	    if (nb_rx > 0)
+	      {
+		port_out = portid ^ 1;
+		nb_tx = rte_eth_tx_burst(port_out, 0, pkts_burst, nb_rx);
+		nb_rx -= nb_tx;
+		printf("\t%u forwarded to port %u\n", nb_tx, port_out);
+	      }
+	    /* for (i = 0; i < nb_rx; ++i) */
+	    /*   { */
+	    /*     dissect(pkts_burst[i], &ether_hdr, &ipv4_hdr); */
+	    /*     print_mac(&ether_hdr->s_addr); */
+	    /*     printf("->"); */
+	    /*     print_mac(&ether_hdr->d_addr); */
+	    /*     printf(": %d\n", IPVER(ipv4_hdr)); */
+	    /*   } */
+	    free_mbuf(pkts_burst, nb_rx);
+	  }
 
     }
   return 0;
@@ -234,6 +238,34 @@ lcore_hello(void *arg)
   return 0;
 }
 
+static char promiscuous_mode = 0;
+
+
+static inline
+void parse_argument(int argc, char **argv)
+{
+  int i, start;
+  char *endptr;
+  for (start = 1;
+       start < argc && strcmp(argv[0], argv[start]);
+       start++)
+    ;
+  for (i = start; i < argc; i++)
+    if (argv[i][0] == '-')
+      switch (argv[i][1])
+	{
+	case 'P':
+	  promiscuous_mode = 1;
+	  break;
+	case 'p':
+	  portmask = strtol(argv[++i], &endptr, 16);
+	  break;
+	default:
+	  break;
+	}
+
+}
+
 #define NB_MBUF 4096
 #define MBUF_SIZE (2048 + sizeof(struct rte_mbuf) + RTE_PKTMBUF_HEADROOM)
 
@@ -242,14 +274,16 @@ MAIN(int argc, char **argv)
 {
   int ret;
   //unsigned lcore_id;
-  uint8_t nb_ports, portid = PORT;
+  uint8_t nb_ports, av_ports, portid = PORTDEF;
   uint16_t nb_rxd = 128;
   uint16_t nb_txd = 128;
 
   ret = rte_eal_init(argc, argv);
   if (ret < 0)
     rte_panic("Cannot init EAL\n");
-
+  
+  parse_argument(argc, argv);
+  
   pktmbuf_pool =
     rte_mempool_create("mbuf_pool", NB_MBUF,
 		       MBUF_SIZE, 32,
@@ -265,24 +299,31 @@ MAIN(int argc, char **argv)
   if (nb_ports <= 0)
     rte_exit(EXIT_FAILURE, "No Ethernet port\n");
 
+  av_ports = 0;
   for (portid = 0; portid < nb_ports; portid++)
-    {
-      ret = rte_eth_dev_configure(portid, 1, 1, &port_conf);
-      if (ret < 0)
-	rte_exit(EXIT_FAILURE, "Cannot configure device: err = %d\n", ret);
-      rte_eth_promiscuous_enable(portid);
-      ret = rte_eth_rx_queue_setup(portid, 0, nb_rxd,
-				   rte_eth_dev_socket_id(portid), &rx_conf, pktmbuf_pool);
-      if (ret < 0)
-	rte_exit(EXIT_FAILURE, "Cannot setup rx queue: err = %d\n", ret);
-      ret = rte_eth_tx_queue_setup(portid, 0, nb_txd,
-				   rte_eth_dev_socket_id(portid), &tx_conf);
-      if (ret < 0)
-	rte_exit(EXIT_FAILURE, "Cannot setup tx queue: err = %d\n", ret);
-      ret = rte_eth_dev_start(portid);
-      if (ret < 0)
-	rte_exit(EXIT_FAILURE, "Cannot start device: err = %d\n", ret);
-    }
+    if (PORT(portid))
+      {
+	ret = rte_eth_dev_configure(portid, 1, 1, &port_conf);
+	if (ret < 0)
+	  rte_exit(EXIT_FAILURE, "Cannot configure device: err = %d\n", ret);
+	if (promiscuous_mode)
+	  rte_eth_promiscuous_enable(portid);
+	ret = rte_eth_rx_queue_setup(portid, 0, nb_rxd,
+				     rte_eth_dev_socket_id(portid), &rx_conf, pktmbuf_pool);
+	if (ret < 0)
+	  rte_exit(EXIT_FAILURE, "Cannot setup rx queue: err = %d\n", ret);
+	ret = rte_eth_tx_queue_setup(portid, 0, nb_txd,
+				     rte_eth_dev_socket_id(portid), &tx_conf);
+	if (ret < 0)
+	  rte_exit(EXIT_FAILURE, "Cannot setup tx queue: err = %d\n", ret);
+	ret = rte_eth_dev_start(portid);
+	if (ret < 0)
+	  rte_exit(EXIT_FAILURE, "Cannot start device: err = %d\n", ret);
+	av_ports++;
+      }
+  if (av_ports <= 0)
+    rte_exit(EXIT_FAILURE, "No port available\n");
+  
   lcore_hello((void *)&nb_ports);
   return 0;
 }
